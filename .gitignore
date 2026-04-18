@@ -1,0 +1,6 @@
+﻿backend/venv/
+backend/__pycache__/
+backend/sql_app.db
+mobile_app/build/
+admin_web/build/
+*.pyc
