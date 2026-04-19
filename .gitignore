@@ -1,6 +1,16 @@
-﻿backend/venv/
-backend/__pycache__/
-backend/sql_app.db
-mobile_app/build/
-admin_web/build/
+﻿# --- Database & Secrets (ห้ามเอาขึ้นเด็ดขาด) ---
+*.db
+*.sqlite
+*.sqlite3
+.env
+
+# --- Python / Backend ---
+venv/
+__pycache__/
 *.pyc
+
+# --- Flutter / Frontend ---
+build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
