@@ -3,171 +3,18 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sqflite/sqflite.dart';
-import 'package:path/path.dart' as path;
-import 'screens/home_screen.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
-void main() { 
-  WidgetsFlutterBinding.ensureInitialized();
-  runApp(const CoffeeShopApp()); 
-}
-
-// 🎨 --- Color Palette ---
-const Color bgCream = Color(0xFFF9F6F0);
-const Color earthBrown = Color(0xFF5D4037);
-const Color mossGreen = Color(0xFF6B705C);
-const Color softBlack = Color(0xFF2C2C2C);
-const Color paperWhite = Color(0xFFFFFFFF);
-const Color borderColor = Color(0xFFE8E4D9);
-const Color mutedText = Color(0xFF8D8D8D);
-
-const Color bgBaseDark = Color(0xFF1A1817);
-const Color surfaceDark = Color(0xFF242220); 
-const Color earthBrownDark = Color(0xFFD4B895); 
-const Color mossGreenDark = Color(0xFF8BA372); 
-const Color softBlackDark = Color(0xFFF9F6F0);
-const Color borderColorDark = Color(0xFF383431); 
-const Color mutedTextDark = Color(0xFF8A847D);
-
-// 📦 --- Models ---
-class ProductModel {
-  final dynamic id;
-  final String name;
-  final double price;
-  final String category;
-  final int stock;
-  final String image;
-
-  ProductModel({required this.id, required this.name, required this.price, required this.category, required this.stock, required this.image});
-
-  factory ProductModel.fromJson(Map<String, dynamic> json) {
-    return ProductModel(
-      id: json['id'],
-      name: json['name'].toString(),
-      price: double.tryParse(json['price'].toString()) ?? 0.0,
-      category: json['category'].toString(),
-      stock: int.tryParse(json['stock'].toString()) ?? 0,
-      image: json['image']?.toString() ?? '',
-    );
-  }
-
-  Map<String, dynamic> toJson() => {
-    'id': id, 'name': name, 'price': price, 'category': category, 'stock': stock, 'image': image
-  };
-}
-
-class CartItem {
-  final dynamic productId;
-  final String name;
-  final double price;
-  int qty;
-  final String type;
-  final String sweet;
-  final String note;
-  final String category;
-
-  CartItem({required this.productId, required this.name, required this.price, required this.qty, required this.type, required this.sweet, required this.note, required this.category});
-
-  Map<String, dynamic> toJson() => {
-    "product_id": productId, "product_name": name, "quantity": qty, "price_at_sale": price,
-    "sweetness": sweet, "item_type": type, "note": note, "category": category
-  };
-
-  factory CartItem.fromJson(Map<String, dynamic> json) {
-    return CartItem(
-      productId: json['product_id'], name: json['product_name'], price: (json['price_at_sale'] as num).toDouble(),
-      qty: json['quantity'], type: json['item_type'], sweet: json['sweetness'], note: json['note'], category: json['category'] ?? ''
-    );
-  }
-}
-
-// 🗄️ --- SQLite Database Helper ---
-class OfflineDBHelper {
-  static final OfflineDBHelper instance = OfflineDBHelper._init();
-  static Database? _database;
-  OfflineDBHelper._init();
-
-  Future<Database> get database async {
-    if (_database != null) return _database!;
-    _database = await _initDB('pos_offline.db');
-    return _database!;
-  }
-
-  Future<Database> _initDB(String filePath) async {
-    final dbPath = await getDatabasesPath();
-    final fullPath = path.join(dbPath, filePath); 
-    return await openDatabase(fullPath, version: 1, onCreate: _createDB);
-  }
-
-  Future _createDB(Database db, int version) async {
-    await db.execute('''
-      CREATE TABLE offline_orders (
-        id TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at TEXT NOT NULL
-      )
-    ''');
-  }
-
-  Future<void> insertOrder(String id, Map<String, dynamic> payload) async {
-    final db = await instance.database;
-    await db.insert('offline_orders', {
-      'id': id, 'payload': json.encode(payload), 'created_at': DateTime.now().toIso8601String(),
-    }, conflictAlgorithm: ConflictAlgorithm.replace);
-  }
-
-  Future<List<Map<String, dynamic>>> getUnsyncedOrders() async {
-    final db = await instance.database;
-    return await db.query('offline_orders', orderBy: 'created_at ASC');
-  }
-
-  Future<void> deleteOrder(String id) async {
-    final db = await instance.database;
-    await db.delete('offline_orders', where: 'id = ?', whereArgs: [id]);
-  }
-}
-
-class CoffeeShopApp extends StatefulWidget {
-  const CoffeeShopApp({super.key});
-  @override
-  State<CoffeeShopApp> createState() => _CoffeeShopAppState();
-}
-
-class _CoffeeShopAppState extends State<CoffeeShopApp> {
-  bool isDarkMode = false;
-  void toggleTheme() { setState(() { isDarkMode = !isDarkMode; }); }
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Sumday POS',
-      debugShowCheckedModeBanner: false,
-      theme: isDarkMode ? _buildDarkTheme() : _buildLightTheme(),
-      home: PosScreen(isDarkMode: isDarkMode, toggleTheme: toggleTheme),
-    );
-  }
-
-  ThemeData _buildLightTheme() {
-    return ThemeData(
-      brightness: Brightness.light, scaffoldBackgroundColor: bgCream, fontFamily: 'serif',
-      appBarTheme: const AppBarTheme(backgroundColor: bgCream, elevation: 0, scrolledUnderElevation: 0, iconTheme: IconThemeData(color: softBlack), titleTextStyle: TextStyle(color: softBlack, fontSize: 22, fontWeight: FontWeight.w600, letterSpacing: 0.5)),
-      colorScheme: const ColorScheme.light(primary: earthBrown, secondary: mossGreen, surface: paperWhite, onSurface: softBlack, outline: borderColor, onSurfaceVariant: mutedText),
-      useMaterial3: true,
-    );
-  }
-
-  ThemeData _buildDarkTheme() {
-    return ThemeData(
-      brightness: Brightness.dark, scaffoldBackgroundColor: bgBaseDark, fontFamily: 'serif',
-      appBarTheme: const AppBarTheme(backgroundColor: bgBaseDark, elevation: 0, scrolledUnderElevation: 0, iconTheme: IconThemeData(color: softBlackDark), titleTextStyle: TextStyle(color: softBlackDark, fontSize: 22, fontWeight: FontWeight.w600, letterSpacing: 0.5)),
-      colorScheme: const ColorScheme.dark(primary: earthBrownDark, secondary: mossGreenDark, surface: surfaceDark, onSurface: softBlackDark, outline: borderColorDark, onSurfaceVariant: mutedTextDark),
-      useMaterial3: true,
-    );
-  }
-}
+// นำเข้าไฟล์ที่เราเพิ่งแยกออกมา
+import '../core/theme.dart';
+import '../core/models.dart';
+import '../services/offline_db.dart';
 
 class PosScreen extends StatefulWidget {
   final bool isDarkMode;
   final VoidCallback toggleTheme;
   const PosScreen({super.key, required this.isDarkMode, required this.toggleTheme});
+
   @override
   State<PosScreen> createState() => _PosScreenState();
 }
@@ -179,7 +26,7 @@ class _PosScreenState extends State<PosScreen> {
   String selectedCategory = "All";
   final List<String> categories = ["All", "Coffee", "Tea", "Dessert", "Other", "About CEO"];
   
-  // 🟢 เสียบสายสื่อสารตรงนี้! ชี้เป้าไปที่เครื่อง Dell Server ถาวร
+  // 🟢 เสียบสายสื่อสารตรงนี้ (ชี้ไปที่ Dell Server ถาวร)
   final String serverUrl = "http://192.168.1.50:8000";
 
   @override
@@ -191,7 +38,7 @@ class _PosScreenState extends State<PosScreen> {
 
   Future<void> saveOrderOffline(Map<String, dynamic> orderData) async {
     String offlineId = "OFFLINE_${DateTime.now().millisecondsSinceEpoch}";
-    orderData['id'] = offlineId; 
+    orderData['id'] = offlineId;
     orderData['created_at'] = DateTime.now().toIso8601String();
     await OfflineDBHelper.instance.insertOrder(offlineId, orderData);
   }
@@ -205,14 +52,12 @@ class _PosScreenState extends State<PosScreen> {
       try {
         var orderData = json.decode(row['payload']);
         orderData.remove('id'); 
-        orderData.remove('created_at'); 
-
+        orderData.remove('created_at');
         var response = await http.post(
           Uri.parse('$serverUrl/orders'), 
           headers: {"Content-Type": "application/json"}, 
           body: json.encode(orderData)
         ).timeout(const Duration(seconds: 5));
-
         if (response.statusCode == 200) {
           await OfflineDBHelper.instance.deleteOrder(dbId);
         }
@@ -233,7 +78,7 @@ class _PosScreenState extends State<PosScreen> {
     }
 
     try {
-      syncOfflineOrders(); 
+      syncOfflineOrders();
       var response = await http.get(Uri.parse('$serverUrl/products')).timeout(const Duration(seconds: 5));
       if (response.statusCode == 200) {
         String responseBody = utf8.decode(response.bodyBytes);
@@ -258,7 +103,7 @@ class _PosScreenState extends State<PosScreen> {
 
   Future<void> placeOrder(String paymentMethod) async {
     if (cart.isEmpty) return;
-    Navigator.pop(context); 
+    Navigator.pop(context);
     Navigator.pop(context);
 
     var orderData = { 
@@ -267,7 +112,6 @@ class _PosScreenState extends State<PosScreen> {
       "employee_id": 1, 
       "items": cart.map((i) => i.toJson()).toList() 
     };
-
     setState(() { cart.clear(); });
     showSoftSnackbar("✅ ຊຳລະເງິນສຳເລັດ! ($paymentMethod)");
 
@@ -285,12 +129,12 @@ class _PosScreenState extends State<PosScreen> {
       var response = await http.delete(Uri.parse('$serverUrl/orders/$orderId')).timeout(const Duration(seconds: 5));
       if (response.statusCode == 200) { 
         showSoftSnackbar("✅ ຍົກເລີກບິນ ແລະ ຄືນສະຕ໋ອກແລ້ວ"); 
-        fetchProducts(); 
+        fetchProducts();
       } else { 
         showSoftSnackbar("ບໍ່ສາມາດຍົກເລີກໄດ້ໃນຂະນະນີ້");
       }
     } catch (e) { 
-      showSoftSnackbar("⚠️ ບໍ່ມີອິນເຕີເນັດ ບໍ່ສາມາດຍົກເລີກບິນເກົ່າໄດ້"); 
+      showSoftSnackbar("⚠️ ບໍ່ມີອິນເຕີເນັດ ບໍ່ສາມາດຍົກເລີກບິນເກົ່າໄດ້");
     }
   }
 
@@ -302,7 +146,6 @@ class _PosScreenState extends State<PosScreen> {
     TextEditingController priceCtrl = TextEditingController(text: isEditing ? existingProduct.price.toString() : "");
     TextEditingController imageCtrl = TextEditingController(text: isEditing ? existingProduct.image : "");
     String newCategory = isEditing ? existingProduct.category : "Coffee";
-    
     showModalBottomSheet(
       context: context, backgroundColor: Theme.of(context).scaffoldBackgroundColor, isScrollControlled: true,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
@@ -311,9 +154,10 @@ class _PosScreenState extends State<PosScreen> {
         return StatefulBuilder(builder: (context, setSheetState) {
           return Padding(
             padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom, left: 20, right: 20, top: 20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -373,6 +217,7 @@ class _PosScreenState extends State<PosScreen> {
                 ),
                 const SizedBox(height: 20),
               ]
+            )
             )
           );
         });
@@ -437,7 +282,6 @@ class _PosScreenState extends State<PosScreen> {
     TextEditingController noteController = TextEditingController();
     double basePrice = product.price;
     double finalPrice = basePrice;
-
     showModalBottomSheet(
       context: context, isScrollControlled: true, backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
@@ -449,9 +293,10 @@ class _PosScreenState extends State<PosScreen> {
             if (!isDessert && selectedMilk == "Oat Milk") { finalPrice += 10000; }
             return Padding(
               padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom, left: 20, right: 20, top: 20),
-              child: Column(
-                mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                   Row(
                     children: [
                       Icon(getCategoryIcon(product.category), color: colorScheme.primary, size: 28), const SizedBox(width: 10),
@@ -514,6 +359,7 @@ class _PosScreenState extends State<PosScreen> {
                   const SizedBox(height: 30),
                 ]
               ),
+              )
             );
           },
         );
@@ -878,7 +724,7 @@ class _PosScreenState extends State<PosScreen> {
   }
 
   List<ProductModel> getFilteredProducts() { 
-    if (selectedCategory == "All") return products; 
+    if (selectedCategory == "All") return products;
     return products.where((i) => i.category == selectedCategory).toList();
   }
 
@@ -891,7 +737,7 @@ class _PosScreenState extends State<PosScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Sumday ☕"), 
+        title: const Text("Coffee Shop☕"), 
         actions: [
           IconButton(onPressed: widget.toggleTheme, icon: Icon(widget.isDarkMode ? Icons.light_mode : Icons.dark_mode, color: colorScheme.onSurfaceVariant)),
           IconButton(onPressed: showHeldBillsDialog, icon: const Icon(Icons.access_time)), 
@@ -973,9 +819,10 @@ class _PosScreenState extends State<PosScreen> {
                                   child: item.image.isNotEmpty
                                   ? ClipRRect(
                                       borderRadius: BorderRadius.circular(8),
-                                      child: Image.network(
-                                        item.image, width: double.infinity, height: double.infinity, fit: BoxFit.cover,
-                                        errorBuilder: (context, error, stackTrace) => Center(child: Icon(getCategoryIcon(item.category), size: 45, color: isOutOfStock ? colorScheme.onSurfaceVariant : colorScheme.primary)),
+                                      child: CachedNetworkImage(
+                                        imageUrl: item.image, width: double.infinity, height: double.infinity, fit: BoxFit.cover,
+                                        placeholder: (context, url) => Center(child: CircularProgressIndicator(color: colorScheme.primary)),
+                                        errorWidget: (context, url, error) => Center(child: Icon(getCategoryIcon(item.category), size: 45, color: isOutOfStock ? colorScheme.onSurfaceVariant : colorScheme.primary)),
                                       ),
                                     )
                                   : Center(child: Icon(getCategoryIcon(item.category), size: 45, color: isOutOfStock ? colorScheme.onSurfaceVariant : colorScheme.primary))
@@ -1021,5 +868,4 @@ class _PosScreenState extends State<PosScreen> {
       ),
     );
   }
-
 }
