@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as path;
 
-// 🗄️ --- SQLite Database Helper ---
 class OfflineDBHelper {
   static final OfflineDBHelper instance = OfflineDBHelper._init();
   static Database? _database;
@@ -16,7 +15,7 @@ class OfflineDBHelper {
 
   Future<Database> _initDB(String filePath) async {
     final dbPath = await getDatabasesPath();
-    final fullPath = path.join(dbPath, filePath);
+    final fullPath = path.join(dbPath, filePath); 
     return await openDatabase(fullPath, version: 1, onCreate: _createDB);
   }
 

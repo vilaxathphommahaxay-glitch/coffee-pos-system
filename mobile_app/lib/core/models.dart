@@ -1,4 +1,3 @@
-// 📦 --- Models ---
 class ProductModel {
   final dynamic id;
   final String name;

@@ -1,10 +1,16 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import requests
+from sqlalchemy.orm import Session
+from typing import List
+import models, schemas, database
+from database import SessionLocal, engine
 
-app = FastAPI()
+# Create Tables in PostgreSQL
+models.Base.metadata.create_all(bind=engine)
 
+app = FastAPI(title="ILa HomeBar API")
+
+# ✅ CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -13,67 +19,85 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# กุญแจ Supabase ของคุณ (ผมใส่ให้เรียบร้อยแล้วครับ ลุยได้เลย)
-SUPABASE_URL = "https://nmpaixqbespnkrvturnz.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5tcGFpeHFiZXNwbmtydnR1cm56Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ5NjgwMTUsImV4cCI6MjA5MDU0NDAxNX0.7WxYbJIKxyuge6Oyz6pz-jnS9MYa1No8c4wFFmke5Os"
-
-def get_headers():
-    return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation"
-    }
-
-class Order(BaseModel):
-    items: list
-    total_price: float
-
-# ==========================================
-# 📦 ดึงหมวดหมู่ (ดักไว้ทั้ง 2 ทางเลยเผื่อแอปเรียกผิด)
-# ==========================================
-@app.get("/categories")
-@app.get("/api/categories")
-def get_categories():
+# DB Session Dependency
+def get_db():
+    db = SessionLocal()
     try:
-        url = f"{SUPABASE_URL}/rest/v1/categories?select=*"
-        res = requests.get(url, headers=get_headers())
-        res.raise_for_status()
-        return res.json()
-    except Exception as e:
-        return []
+        yield db
+    finally:
+        db.close()
 
-# ==========================================
-# ☕ ดึงเมนูสินค้า (ดักไว้ทั้ง 2 ทางเช่นกัน!)
-# ==========================================
-@app.get("/products")
-@app.get("/api/products")
-def get_products():
-    try:
-        url = f"{SUPABASE_URL}/rest/v1/products?select=*"
-        res = requests.get(url, headers=get_headers())
-        res.raise_for_status()
-        return res.json()
-    except Exception as e:
-        return []
-
-# ==========================================
-# ☁️ ส่งออเดอร์ขึ้น Cloud
-# ==========================================
-@app.post("/orders")
-@app.post("/api/orders")
-async def create_order(order: Order):
-    try:
-        url = f"{SUPABASE_URL}/rest/v1/orders"
-        payload = {"items": order.items, "total_price": order.total_price}
-        
-        res = requests.post(url, headers=get_headers(), json=payload)
-        res.raise_for_status() 
-        return {"status": "success", "message": "ออเดอร์บันทึกขึ้นคลาวด์แล้ว!", "data": res.json()}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-# 👇 ประตูหน้าบ้าน เอาไว้รับแขกและเอาใจยาม Render 👇
 @app.get("/")
 def read_root():
-    return {"message": "Hello Render! Sumday POS is awake and healthy! 🟢"}
+    return {"message": "☕ ILa HomeBar Server is Online!", "status": "healthy"}
+
+# --- 📦 PRODUCTS & CATEGORIES ---
+
+@app.get("/products", response_model=List[schemas.Product])
+def get_products(db: Session = Depends(get_db)):
+    return db.query(models.Product).filter(models.Product.is_active == True).all()
+
+@app.get("/categories")
+def get_categories(db: Session = Depends(get_db)):
+    categories = db.query(models.Product.category).distinct().all()
+    return [c[0] for c in categories]
+
+# --- 🧾 ORDERS ---
+
+@app.post("/orders")
+def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)):
+    try:
+        # 1. Create Order
+        new_order = models.Order(
+            total_amount=order.total_amount,
+            payment_method=order.payment_method,
+            employee_id=order.employee_id,
+            sync_status="synced"
+        )
+        db.add(new_order)
+        db.flush()
+
+        # 2. Add Items & Update Stock
+        for item in order.items:
+            order_item = models.OrderItem(
+                order_id=new_order.id,
+                product_id=item.product_id,
+                quantity=item.quantity,
+                price_at_sale=item.price_at_sale,
+                sweetness=item.sweetness,
+                item_type=item.item_type,
+                note=item.note
+            )
+            db.add(order_item)
+
+            # Update Stock logic
+            product = db.query(models.Product).filter(models.Product.id == item.product_id).first()
+            if product and product.stock >= item.quantity:
+                product.stock -= item.quantity
+
+        db.commit()
+        db.refresh(new_order)
+        return {"status": "success", "order_id": new_order.id}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Order creation failed: {str(e)}")
+
+@app.get("/orders")
+def get_order_history(limit: int = 50, db: Session = Depends(get_db)):
+    return db.query(models.Order).order_by(models.Order.created_at.desc()).limit(limit).all()
+
+@app.delete("/orders/{order_id}")
+def refund_order(order_id: int, db: Session = Depends(get_db)):
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order ID not found")
+    
+    # Restock products
+    for item in order.items:
+        product = db.query(models.Product).filter(models.Product.id == item.product_id).first()
+        if product:
+            product.stock += item.quantity
+            
+    db.delete(order)
+    db.commit()
+    return {"status": "success", "message": "Order refunded and stock restored"}

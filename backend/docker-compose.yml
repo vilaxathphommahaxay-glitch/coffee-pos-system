@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  # 🐘 Database: PostgreSQL
+  db:
+    image: postgres:15-alpine
+    container_name: ila_homebar_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: coffee_pos_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init_db.sql:/docker-entrypoint-initdb.d/init_db.sql # รันสคริปต์สร้างตารางอัตโนมัติ
+
+  # ☕ Backend: FastAPI
+  backend:
+    build: .
+    container_name: ila_homebar_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:admin@db/coffee_pos_db
+    depends_on:
+      - db
+
+volumes:
+  postgres_data:

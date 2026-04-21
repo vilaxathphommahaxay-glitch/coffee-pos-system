@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
@@ -5,7 +6,6 @@ import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
-// นำเข้าไฟล์ที่เราเพิ่งแยกออกมา
 import '../core/theme.dart';
 import '../core/models.dart';
 import '../services/offline_db.dart';
@@ -23,17 +23,70 @@ class _PosScreenState extends State<PosScreen> {
   List<ProductModel> products = [];
   List<CartItem> cart = [];
   bool isLoading = false;
+  bool isServerOnline = false;
+  bool isSyncing = false;
+  
+  Timer? _serverCheckTimer;
+  int _pollingInterval = 10; 
+  
   String selectedCategory = "All";
   final List<String> categories = ["All", "Coffee", "Tea", "Dessert", "Other", "About CEO"];
   
-  // 🟢 เสียบสายสื่อสารตรงนี้ (ชี้ไปที่ Dell Server ถาวร)
   final String serverUrl = "http://192.168.1.50:8000";
 
   @override
   void initState() {
     super.initState();
     fetchProducts();
-    syncOfflineOrders();
+    _startSmartPolling();
+  }
+
+  @override
+  void dispose() {
+    _serverCheckTimer?.cancel();
+    super.dispose();
+  }
+
+  void _startSmartPolling() {
+    _serverCheckTimer?.cancel();
+    _checkConnection();
+    _serverCheckTimer = Timer.periodic(Duration(seconds: _pollingInterval), (timer) {
+      _checkConnection();
+    });
+  }
+
+  Future<void> _checkConnection() async {
+    try {
+      final response = await http.get(Uri.parse(serverUrl)).timeout(const Duration(seconds: 2));
+      bool currentStatus = response.statusCode == 200;
+      
+      if (mounted) {
+        setState(() { 
+          isServerOnline = currentStatus;
+          int nextInterval = isServerOnline ? 10 : 30;
+          if (nextInterval != _pollingInterval) {
+            _pollingInterval = nextInterval;
+            _startSmartPolling();
+          }
+        });
+        if (isServerOnline) syncOfflineOrders();
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() { 
+          isServerOnline = false; 
+          if (_pollingInterval != 30) {
+            _pollingInterval = 30;
+            _startSmartPolling();
+          }
+        });
+      }
+    }
+  }
+
+  Future<void> _updateLocalCache() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('cached_products', json.encode(products.map((p) => p.toJson()).toList()));
   }
 
   Future<void> saveOrderOffline(Map<String, dynamic> orderData) async {
@@ -44,9 +97,11 @@ class _PosScreenState extends State<PosScreen> {
   }
 
   Future<void> syncOfflineOrders() async {
+    if (isSyncing) return;
     List<Map<String, dynamic>> unsyncedOrders = await OfflineDBHelper.instance.getUnsyncedOrders();
     if (unsyncedOrders.isEmpty) return;
 
+    setState(() => isSyncing = true);
     for (var row in unsyncedOrders) {
       String dbId = row['id'];
       try {
@@ -65,6 +120,7 @@ class _PosScreenState extends State<PosScreen> {
         debugPrint("Sync failed for $dbId: $e");
       }
     }
+    setState(() => isSyncing = false);
   }
 
   Future<void> fetchProducts() async {
@@ -74,17 +130,19 @@ class _PosScreenState extends State<PosScreen> {
     
     if (cachedData != null && cachedData.isNotEmpty) {
       List decoded = json.decode(cachedData);
-      products = decoded.map((p) => ProductModel.fromJson(p)).toList();
+      setState(() {
+        products = decoded.map((p) => ProductModel.fromJson(p)).toList();
+      });
     }
 
     try {
-      syncOfflineOrders();
       var response = await http.get(Uri.parse('$serverUrl/products')).timeout(const Duration(seconds: 5));
       if (response.statusCode == 200) {
         String responseBody = utf8.decode(response.bodyBytes);
         List decoded = json.decode(responseBody);
         setState(() { 
           products = decoded.map((p) => ProductModel.fromJson(p)).toList(); 
+          isServerOnline = true;
           isLoading = false; 
         });
         await prefs.setString('cached_products', responseBody); 
@@ -92,167 +150,45 @@ class _PosScreenState extends State<PosScreen> {
         throw Exception("Server Error");
       }
     } catch (e) { 
-      setState(() => isLoading = false);
-      if (products.isEmpty) {
-        showSoftSnackbar("⚠️ ບໍ່ສາມາດໂຫຼດຂໍ້ມູນໄດ້ ກະລຸນາກວດສອບອິນເຕີເນັດ");
-      } else {
-        showSoftSnackbar("📡 ໃຊ້ງານໂໝດອອຟລາຍ (Offline Mode)");
-      }
+      setState(() { isLoading = false; isServerOnline = false; });
     }
   }
 
-  Future<void> placeOrder(String paymentMethod) async {
-    if (cart.isEmpty) return;
-    Navigator.pop(context);
-    Navigator.pop(context);
-
-    var orderData = { 
-      "total_amount": cart.fold(0.0, (sum, item) => sum + (item.price * item.qty)), 
-      "payment_method": paymentMethod, 
-      "employee_id": 1, 
-      "items": cart.map((i) => i.toJson()).toList() 
-    };
-    setState(() { cart.clear(); });
-    showSoftSnackbar("✅ ຊຳລະເງິນສຳເລັດ! ($paymentMethod)");
-
-    await saveOrderOffline(orderData);
-    syncOfflineOrders();
-  }
-
-  Future<void> processRefund(dynamic orderId) async {
-    if (orderId.toString().startsWith("OFFLINE_")) {
-      await OfflineDBHelper.instance.deleteOrder(orderId.toString());
-      showSoftSnackbar("✅ ຍົກເລີກບິນອອຟລາຍສຳເລັດ");
-      return;
-    }
-    try {
-      var response = await http.delete(Uri.parse('$serverUrl/orders/$orderId')).timeout(const Duration(seconds: 5));
-      if (response.statusCode == 200) { 
-        showSoftSnackbar("✅ ຍົກເລີກບິນ ແລະ ຄືນສະຕ໋ອກແລ້ວ"); 
-        fetchProducts();
-      } else { 
-        showSoftSnackbar("ບໍ່ສາມາດຍົກເລີກໄດ້ໃນຂະນະນີ້");
-      }
-    } catch (e) { 
-      showSoftSnackbar("⚠️ ບໍ່ມີອິນເຕີເນັດ ບໍ່ສາມາດຍົກເລີກບິນເກົ່າໄດ້");
-    }
-  }
-
-  void showAddProductDialog() { showManageProductDialog(); }
-
-  void showManageProductDialog({ProductModel? existingProduct, int? index}) {
-    bool isEditing = existingProduct != null;
-    TextEditingController nameCtrl = TextEditingController(text: isEditing ? existingProduct.name : "");
-    TextEditingController priceCtrl = TextEditingController(text: isEditing ? existingProduct.price.toString() : "");
-    TextEditingController imageCtrl = TextEditingController(text: isEditing ? existingProduct.image : "");
-    String newCategory = isEditing ? existingProduct.category : "Coffee";
-    showModalBottomSheet(
-      context: context, backgroundColor: Theme.of(context).scaffoldBackgroundColor, isScrollControlled: true,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (context) {
-        final colorScheme = Theme.of(context).colorScheme;
-        return StatefulBuilder(builder: (context, setSheetState) {
-          return Padding(
-            padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom, left: 20, right: 20, top: 20),
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(isEditing ? "✏️ ແກ້ໄຂເມນູ" : "➕ ເພີ່ມເມນູໃໝ່", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: colorScheme.onSurface)),
-                    if (isEditing) 
-                      IconButton(
-                        icon: const Icon(Icons.delete, color: Colors.redAccent),
-                        onPressed: () async {
-                          setState(() { products.removeAt(index!); });
-                          final prefs = await SharedPreferences.getInstance();
-                          await prefs.setString('cached_products', json.encode(products.map((p) => p.toJson()).toList()));
-                          Navigator.pop(context); Navigator.pop(context); 
-                          showSoftSnackbar("🗑️ ລຶບເມນູສຳເລັດ!");
-                        }
-                      )
-                  ],
-                ),
-                const SizedBox(height: 15),
-                TextField(controller: nameCtrl, style: TextStyle(color: colorScheme.onSurface), decoration: InputDecoration(labelText: "ຊື່ເມນູ (Name)", labelStyle: TextStyle(color: colorScheme.onSurfaceVariant), filled: true, fillColor: colorScheme.surface, border: const OutlineInputBorder(borderSide: BorderSide.none))),
-                const SizedBox(height: 10),
-                TextField(controller: priceCtrl, style: TextStyle(color: colorScheme.onSurface), keyboardType: TextInputType.number, decoration: InputDecoration(labelText: "ລາຄາ (Price)", suffixText: "LAK", labelStyle: TextStyle(color: colorScheme.onSurfaceVariant), filled: true, fillColor: colorScheme.surface, border: const OutlineInputBorder(borderSide: BorderSide.none))),
-                const SizedBox(height: 10),
-                TextField(controller: imageCtrl, style: TextStyle(color: colorScheme.onSurface), decoration: InputDecoration(labelText: "ລິ້ງຮູບພາບ (URL)", hintText: "ວາງລິ້ງຮູບ...", labelStyle: TextStyle(color: colorScheme.onSurfaceVariant), filled: true, fillColor: colorScheme.surface, border: const OutlineInputBorder(borderSide: BorderSide.none))),
-                const SizedBox(height: 15),
-                Text("ໝວດໝູ່ (Category)", style: TextStyle(fontWeight: FontWeight.bold, color: colorScheme.onSurface)),
-                const SizedBox(height: 5),
-                Wrap(
-                  spacing: 8,
-                  children: ["Coffee", "Tea", "Dessert", "Other"].map((c) => ChoiceChip(
-                    label: Text(c), selected: newCategory == c, selectedColor: colorScheme.primary, backgroundColor: colorScheme.surface,
-                    side: BorderSide(color: newCategory == c ? colorScheme.primary : colorScheme.outline),
-                    labelStyle: TextStyle(color: newCategory == c ? (widget.isDarkMode ? softBlackDark : paperWhite) : colorScheme.onSurface),
-                    showCheckmark: false,
-                    onSelected: (val) { if (val) setSheetState(() => newCategory = c); }
-                  )).toList()
-                ),
-                const SizedBox(height: 25),
-                SizedBox(
-                  width: double.infinity, height: 50,
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(backgroundColor: colorScheme.secondary, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
-                    onPressed: () async {
-                      if (nameCtrl.text.isEmpty || priceCtrl.text.isEmpty) return;
-                      ProductModel newProduct = ProductModel(
-                        id: isEditing ? existingProduct.id : DateTime.now().millisecondsSinceEpoch,
-                        name: nameCtrl.text, price: double.tryParse(priceCtrl.text) ?? 0,
-                        category: newCategory, stock: 999, image: imageCtrl.text
-                      );
-                      setState(() { if (isEditing) { products[index!] = newProduct; } else { products.add(newProduct); } });
-                      final prefs = await SharedPreferences.getInstance();
-                      await prefs.setString('cached_products', json.encode(products.map((p) => p.toJson()).toList()));
-                      Navigator.pop(context); if(isEditing) Navigator.pop(context); 
-                      showSoftSnackbar(isEditing ? "✅ ອັບເດດເມນູສຳເລັດ!" : "🎉 ເພີ່ມເມນູໃໝ່ສຳເລັດ!");
-                    },
-                    child: Text("ບັນທຶກ (Save)", style: TextStyle(color: widget.isDarkMode ? softBlackDark : paperWhite, fontSize: 18))
-                  )
-                ),
-                const SizedBox(height: 20),
-              ]
-            )
-            )
+  void addToCart(ProductModel product, String type, String sweet, String note, double finalPrice) {
+    setState(() {
+      int productIndex = products.indexWhere((p) => p.id == product.id);
+      if (productIndex != -1) {
+        if (products[productIndex].stock > 0) {
+          var p = products[productIndex];
+          products[productIndex] = ProductModel(
+            id: p.id, name: p.name, price: p.price, category: p.category, 
+            stock: p.stock - 1, image: p.image
           );
-        });
+          _updateLocalCache(); 
+        } else {
+          showSoftSnackbar("⚠️ ສິນຄ້າໝົດສະຕ໋ອກ!");
+          return;
+        }
       }
-    );
+
+      var existingIndex = cart.indexWhere((item) => item.productId == product.id && item.type == type && item.sweet == sweet);
+      if (existingIndex != -1) { 
+        cart[existingIndex].qty++; 
+      } else { 
+        cart.add(CartItem(productId: product.id, name: product.name, price: finalPrice, qty: 1, type: type, sweet: sweet, note: note, category: product.category)); 
+      }
+    });
   }
 
-  void showManageOptions(int index, ProductModel item) {
-    showModalBottomSheet(
-      context: context, backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (context) {
-        final colorScheme = Theme.of(context).colorScheme;
-        return Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(item.name, style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: colorScheme.onSurface)),
-              const SizedBox(height: 20),
-              ListTile(leading: Icon(Icons.edit, color: colorScheme.secondary), title: Text("ແກ້ໄຂເມນູນີ້ (Edit)", style: TextStyle(color: colorScheme.onSurface)), onTap: () => showManageProductDialog(existingProduct: item, index: index)),
-              ListTile(
-                leading: const Icon(Icons.delete, color: Colors.redAccent), title: const Text("ລຶບເມນູນີ້ (Delete)", style: TextStyle(color: Colors.redAccent)),
-                onTap: () async {
-                  setState(() { products.removeAt(index); });
-                  final prefs = await SharedPreferences.getInstance();
-                  await prefs.setString('cached_products', json.encode(products.map((p) => p.toJson()).toList()));
-                  Navigator.pop(context); showSoftSnackbar("🗑️ ລຶບເມນູສຳເລັດ!");
-                },
-              ),
-            ],
-          ),
-        );
-      }
-    );
+  void decreaseQty(int index) { setState(() { if (cart[index].qty > 1) { cart[index].qty--; } else { cart.removeAt(index); } }); }
+  void increaseQty(int index) { setState(() { cart[index].qty++; }); }
+
+  void showSoftSnackbar(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg, style: const TextStyle(fontFamily: 'serif', fontSize: 16)),
+      backgroundColor: Theme.of(context).colorScheme.onSurface, behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), duration: const Duration(seconds: 2),
+    ));
   }
 
   IconData getCategoryIcon(String category) {
@@ -265,606 +201,206 @@ class _PosScreenState extends State<PosScreen> {
     }
   }
 
-  void showSoftSnackbar(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(msg, style: TextStyle(color: Theme.of(context).scaffoldBackgroundColor, fontFamily: 'serif', fontSize: 16)),
-      backgroundColor: Theme.of(context).colorScheme.onSurface, behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), duration: const Duration(seconds: 3),
-    ));
-  }
-
-  void openProductOptionDialog(ProductModel product) {
-    bool isDessert = product.category == 'Dessert';
-    String selectedType = "Iced";
-    String selectedSweet = "100%";
-    String selectedMilk = "Cow Milk"; 
-    if (isDessert) { selectedType = "Normal"; selectedSweet = "-"; }
-    TextEditingController noteController = TextEditingController();
-    double basePrice = product.price;
-    double finalPrice = basePrice;
-    showModalBottomSheet(
-      context: context, isScrollControlled: true, backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (context) {
-        final colorScheme = Theme.of(context).colorScheme;
-        return StatefulBuilder(
-          builder: (context, setSheetState) {
-            finalPrice = basePrice;
-            if (!isDessert && selectedMilk == "Oat Milk") { finalPrice += 10000; }
-            return Padding(
-              padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom, left: 20, right: 20, top: 20),
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                  Row(
-                    children: [
-                      Icon(getCategoryIcon(product.category), color: colorScheme.primary, size: 28), const SizedBox(width: 10),
-                      Expanded(child: Text(product.name, style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: colorScheme.onSurface))),
-                    ],
-                  ),
-                  const SizedBox(height: 5),
-                  Text("${NumberFormat("#,##0").format(finalPrice)} LAK", style: TextStyle(fontSize: 18, color: colorScheme.primary, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 20),
-                  
-                  if (!isDessert) ...[
-                    Text("ປະເພດ (Type)", style: TextStyle(color: colorScheme.onSurface, fontSize: 16, fontWeight: FontWeight.bold)), const SizedBox(height: 8),
-                    Wrap(
-                      spacing: 10.0, 
-                      children: ["Hot", "Iced"].map((type) { 
-                        bool isSel = selectedType == type;
-                        return ChoiceChip(label: Text(type, style: TextStyle(color: isSel ? (widget.isDarkMode ? softBlackDark : paperWhite) : colorScheme.onSurface, fontWeight: FontWeight.bold)), selected: isSel, showCheckmark: false, selectedColor: colorScheme.primary, backgroundColor: colorScheme.surface, side: BorderSide(color: isSel ? colorScheme.primary : colorScheme.outline), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), onSelected: (selected) { if (selected) setSheetState(() => selectedType = type); });
-                      }).toList()
-                    ),
-                    const SizedBox(height: 15),
-
-                    if (product.category == 'Coffee' || product.category == 'Tea') ...[
-                      Text("ປະເພດນົມ (Milk)", style: TextStyle(color: colorScheme.onSurface, fontSize: 16, fontWeight: FontWeight.bold)), const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 10.0, 
-                        children: ["Cow Milk", "Oat Milk"].map((milk) { 
-                          bool isSel = selectedMilk == milk;
-                          String label = milk == "Oat Milk" ? "ນົມໂອ໊ດ (Oat) +10k" : "ນົມງົວ (Cow)";
-                          return ChoiceChip(label: Text(label, style: TextStyle(color: isSel ? (widget.isDarkMode ? softBlackDark : paperWhite) : colorScheme.onSurface, fontWeight: FontWeight.bold)), selected: isSel, showCheckmark: false, selectedColor: colorScheme.secondary, backgroundColor: colorScheme.surface, side: BorderSide(color: isSel ? colorScheme.secondary : colorScheme.outline), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), onSelected: (selected) { if (selected) setSheetState(() => selectedMilk = milk); });
-                        }).toList()
-                      ),
-                      const SizedBox(height: 15),
-                    ],
-
-                    Text("ຄວາມຫວານ (Sweetness)", style: TextStyle(color: colorScheme.onSurface, fontSize: 16, fontWeight: FontWeight.bold)), const SizedBox(height: 8),
-                    Wrap(
-                      spacing: 10.0, 
-                      children: ["0%", "25%", "50%", "100%"].map((sweet) { 
-                        bool isSel = selectedSweet == sweet;
-                        return ChoiceChip(label: Text(sweet, style: TextStyle(color: isSel ? (widget.isDarkMode ? softBlackDark : paperWhite) : colorScheme.onSurface, fontWeight: FontWeight.bold)), selected: isSel, showCheckmark: false, selectedColor: colorScheme.primary, backgroundColor: colorScheme.surface, side: BorderSide(color: isSel ? colorScheme.primary : colorScheme.outline), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), onSelected: (selected) { if (selected) setSheetState(() => selectedSweet = sweet); }); 
-                      }).toList()
-                    ),
-                    const SizedBox(height: 20),
-                  ],
-                  TextField(controller: noteController, style: TextStyle(color: colorScheme.onSurface), cursorColor: colorScheme.primary, decoration: InputDecoration(hintText: "ໝາຍເຫດ / Note (Optional)...", hintStyle: TextStyle(color: colorScheme.onSurfaceVariant), filled: true, fillColor: colorScheme.surface, border: const OutlineInputBorder(borderSide: BorderSide.none, borderRadius: BorderRadius.all(Radius.circular(8))))),
-                  const SizedBox(height: 30), 
-                  SizedBox(
-                    width: double.infinity, height: 55,
-                    child: ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(backgroundColor: colorScheme.primary, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)), elevation: 0), 
-                      onPressed: () { 
-                        String finalType = isDessert ? selectedType : "$selectedType, ${selectedMilk.split(' ')[0]}";
-                        addToCart(product, finalType, selectedSweet, noteController.text, finalPrice); 
-                        Navigator.pop(context); 
-                      }, 
-                      icon: Icon(Icons.add_shopping_cart, color: widget.isDarkMode ? softBlackDark : paperWhite),
-                      label: Text("ເພີ່ມລົງກະຕ່າ (Add)", style: TextStyle(color: widget.isDarkMode ? softBlackDark : paperWhite, fontSize: 18, letterSpacing: 1))
-                    )
-                  ),
-                  const SizedBox(height: 30),
-                ]
-              ),
-              )
-            );
-          },
-        );
-      },
-    );
-  }
-
-  void addToCart(ProductModel product, String type, String sweet, String note, double finalPrice) {
-    setState(() {
-      var existingIndex = cart.indexWhere((item) => item.productId == product.id && item.type == type && item.sweet == sweet);
-      if (existingIndex != -1) { cart[existingIndex].qty++; } 
-      else { cart.add(CartItem(productId: product.id, name: product.name, price: finalPrice, qty: 1, type: type, sweet: sweet, note: note, category: product.category)); }
-    });
-  }
-  void decreaseQty(int index) { setState(() { if (cart[index].qty > 1) { cart[index].qty--; } else { cart.removeAt(index); } }); }
-  void increaseQty(int index) { setState(() { cart[index].qty++; }); }
-
-  Future<void> holdBill() async {
-    if (cart.isEmpty) return;
-    TextEditingController nameController = TextEditingController();
-    showModalBottomSheet(
-      context: context, backgroundColor: Theme.of(context).scaffoldBackgroundColor, isScrollControlled: true,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (context) {
-        final colorScheme = Theme.of(context).colorScheme;
-        return Padding(
-          padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom, left: 20, right: 20, top: 20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text("ພັກບິນ (Hold Order) ⏸️", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: colorScheme.onSurface)), const SizedBox(height: 15),
-              TextField(controller: nameController, style: TextStyle(color: colorScheme.onSurface), decoration: InputDecoration(hintText: "ຊື່ລູກຄ້າ / โต๊ะ", hintStyle: TextStyle(color: colorScheme.onSurfaceVariant), filled: true, fillColor: colorScheme.surface, border: const OutlineInputBorder(borderSide: BorderSide.none))),
-              const SizedBox(height: 20),
-              SizedBox(
-                width: double.infinity, height: 55,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(backgroundColor: Colors.orange[700], elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
-                  onPressed: () async {
-                    String name = nameController.text.isEmpty ? "Order ${DateFormat('HH:mm').format(DateTime.now())}" : nameController.text;
-                    final prefs = await SharedPreferences.getInstance();
-                    List<String> heldBills = prefs.getStringList('held_bills') ?? [];
-                    heldBills.add(json.encode({ "name": name, "time": DateTime.now().toString(), "items": cart.map((e)=>e.toJson()).toList() }));
-                    await prefs.setStringList('held_bills', heldBills);
-                    setState(() { cart.clear(); }); 
-                    Navigator.pop(context); Navigator.pop(context); 
-                    showSoftSnackbar("ພັກບິນຮຽບຮ້ອຍ!");
-                  }, 
-                  child: const Text("ບັນທຶກ (Hold)", style: TextStyle(color: Colors.white, fontSize: 18))
-                )
-              ),
-              const SizedBox(height: 30),
-            ],
-          )
-        );
-      }
-    );
-  }
-
-  void showPaymentDialog() {
-    double total = cart.fold(0.0, (sum, item) => sum + (item.price * item.qty));
-    showModalBottomSheet(
-      context: context, backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (context) {
-        final colorScheme = Theme.of(context).colorScheme;
-        return Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min, 
-            children: [
-              Text("ເລືອກວິທີຊຳລະເງິນ", style: TextStyle(fontSize: 18, color: colorScheme.onSurface, fontWeight: FontWeight.bold)), const SizedBox(height: 10),
-              Text("${NumberFormat("#,##0").format(total)} LAK", style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: colorScheme.secondary)), const SizedBox(height: 30),
-              Row(
-                children: [
-                  Expanded(child: SizedBox(height: 60, child: ElevatedButton.icon(icon: Icon(Icons.money, color: widget.isDarkMode ? softBlackDark : paperWhite), style: ElevatedButton.styleFrom(backgroundColor: colorScheme.secondary, elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))), onPressed: () => placeOrder("CASH"), label: Text("ເງິນສົດ", style: TextStyle(fontSize: 18, color: widget.isDarkMode ? softBlackDark : paperWhite))))),
-                  const SizedBox(width: 15),
-                  Expanded(child: SizedBox(height: 60, child: ElevatedButton.icon(icon: Icon(Icons.qr_code, color: widget.isDarkMode ? softBlackDark : paperWhite), style: ElevatedButton.styleFrom(backgroundColor: colorScheme.primary, elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))), onPressed: () => placeOrder("QR_ONEPAY"), label: Text("ສະແກນ QR", style: TextStyle(fontSize: 18, color: widget.isDarkMode ? softBlackDark : paperWhite))))),
-                ],
-              ),
-              const SizedBox(height: 30),
-            ]
-          ),
-        );
-      }
-    );
-  }
-
-  void showCartDialog() {
-    showModalBottomSheet(
-      context: context, isScrollControlled: true, backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (context) {
-        final colorScheme = Theme.of(context).colorScheme;
-        return StatefulBuilder(
-          builder: (context, setSheetState) {
-            void updateState(Function action) { setState(() { action(); }); setSheetState(() {}); if (cart.isEmpty) Navigator.pop(context); }
-            double total = cart.fold(0.0, (sum, item) => sum + (item.price * item.qty));
-
-            return SizedBox(
-              height: MediaQuery.of(context).size.height * 0.85, 
-              child: Column(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.all(20),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text("🛒 ລາຍການສັ່ງຊື້", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: colorScheme.onSurface)),
-                        GestureDetector(onTap: () => Navigator.pop(context), child: Icon(Icons.close, color: colorScheme.onSurfaceVariant, size: 28))
-                      ],
-                    )
-                  ),
-                  Expanded(
-                    child: ListView.builder(
-                      itemCount: cart.length, 
-                      itemBuilder: (context, index) {
-                        final item = cart[index];
-                        return Container(
-                          margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 8), padding: const EdgeInsets.all(15),
-                          decoration: BoxDecoration(color: colorScheme.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: colorScheme.outline)),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start, 
-                                  children: [
-                                    Text(item.name, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: colorScheme.onSurface)), const SizedBox(height: 4),
-                                    if (item.category != 'Dessert') Text("${item.type} · Sweet ${item.sweet}", style: TextStyle(color: colorScheme.secondary, fontSize: 13, fontWeight: FontWeight.bold)),
-                                    if (item.note != "") Text("Note: ${item.note}", style: TextStyle(color: Colors.red[400], fontSize: 12, fontStyle: FontStyle.italic)),
-                                    const SizedBox(height: 6),
-                                    Text("${NumberFormat("#,##0").format(item.price)} LAK", style: TextStyle(color: colorScheme.onSurface)),
-                                  ]
-                                )
-                              ),
-                              Row(
-                                children: [
-                                  IconButton(icon: Icon(Icons.remove_circle_outline, color: colorScheme.primary), onPressed: () => updateState(() => decreaseQty(index))),
-                                  Text("${item.qty}", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: colorScheme.onSurface)),
-                                  IconButton(icon: Icon(Icons.add_circle_outline, color: colorScheme.secondary), onPressed: () => updateState(() => increaseQty(index))),
-                                ]
-                              )
-                            ],
-                          ),
-                        );
-                      }
-                    )
-                  ),
-                  Container(
-                    padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: colorScheme.surface, border: Border(top: BorderSide(color: colorScheme.outline))), 
-                    child: Column(
-                      children: [
-                        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text("ລວມ:", style: TextStyle(fontSize: 18, color: colorScheme.onSurface, fontWeight: FontWeight.bold)), Text("${NumberFormat("#,##0").format(total)} LAK", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: colorScheme.secondary))]),
-                        const SizedBox(height: 20), 
-                        Row(
-                          children: [
-                            Expanded(flex: 1, child: SizedBox(height: 55, child: ElevatedButton(onPressed: cart.isEmpty ? null : holdBill, style: ElevatedButton.styleFrom(backgroundColor: widget.isDarkMode ? Colors.orange.shade900 : Colors.orange[50], elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8), side: BorderSide(color: Colors.orange.shade200))), child: Icon(Icons.pause, color: widget.isDarkMode ? Colors.white : Colors.orange[800])))),
-                            const SizedBox(width: 15),
-                            Expanded(flex: 3, child: SizedBox(height: 55, child: ElevatedButton(onPressed: cart.isEmpty ? null : showPaymentDialog, style: ElevatedButton.styleFrom(backgroundColor: colorScheme.secondary, elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))), child: Text("ຊຳລະເງິນ (PAY)", style: TextStyle(fontSize: 18, color: widget.isDarkMode ? softBlackDark : paperWhite, fontWeight: FontWeight.bold))))),
-                          ],
-                        )
-                      ]
-                    )
-                  )
-                ],
-              ),
-            );
-          }
-        );
-      }
-    );
-  }
-
-  Future<void> showHeldBillsDialog() async {
-    final prefs = await SharedPreferences.getInstance();
-    List<String> heldBills = prefs.getStringList('held_bills') ?? [];
-    showModalBottomSheet(
-      context: context, backgroundColor: Theme.of(context).scaffoldBackgroundColor, isScrollControlled: true,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (context) {
-        final colorScheme = Theme.of(context).colorScheme;
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return SizedBox(
-              height: MediaQuery.of(context).size.height * 0.7,
-              child: Column(
-                children: [
-                  Padding(padding: const EdgeInsets.all(20), child: Align(alignment: Alignment.centerLeft, child: Text("📂 ບິນທີ່ພັກໄວ້ (Queue)", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: colorScheme.onSurface)))),
-                  Expanded(
-                    child: heldBills.isEmpty 
-                      ? Center(child: Text("ບໍ່ມີລາຍການ", style: TextStyle(color: colorScheme.onSurfaceVariant)))
-                      : ListView.builder(
-                          itemCount: heldBills.length,
-                          itemBuilder: (context, index) {
-                            Map<String, dynamic> bill = json.decode(heldBills[index]);
-                            List items = bill['items'];
-                            return Container(
-                              margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 8), decoration: BoxDecoration(color: colorScheme.surface, borderRadius: BorderRadius.circular(8), border: Border.all(color: colorScheme.outline)),
-                              child: ListTile(
-                                leading: CircleAvatar(backgroundColor: widget.isDarkMode ? Colors.orange.shade900 : Colors.orange[100], child: Icon(Icons.pause, color: widget.isDarkMode ? Colors.white : Colors.orange[800])),
-                                contentPadding: const EdgeInsets.symmetric(horizontal: 15, vertical: 5),
-                                title: Text(bill['name'], style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: colorScheme.onSurface)), subtitle: Text("${items.length} ລາຍການ", style: TextStyle(color: colorScheme.onSurfaceVariant)),
-                                trailing: TextButton(
-                                  style: TextButton.styleFrom(foregroundColor: colorScheme.primary, backgroundColor: Theme.of(context).scaffoldBackgroundColor),
-                                  onPressed: () async {
-                                    if (cart.isNotEmpty) { showSoftSnackbar("ກະລຸນາເຄຍກະຕ່າປັດຈຸບັນກ່ອນ"); return; }
-                                    setState(() { cart = items.map((i) => CartItem.fromJson(i)).toList(); });
-                                    heldBills.removeAt(index); await prefs.setStringList('held_bills', heldBills);
-                                    Navigator.pop(context);
-                                  }, 
-                                  child: const Text("ເລືອກ (Resume)", style: TextStyle(fontWeight: FontWeight.bold))
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                  ),
-                ],
-              )
-            );
-          }
-        );
-      }
-    );
-  }
-
-  Future<void> showOrderHistory() async {
-    final prefs = await SharedPreferences.getInstance();
-    showModalBottomSheet(
-      context: context, backgroundColor: Theme.of(context).scaffoldBackgroundColor, isScrollControlled: true,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (context) {
-        final colorScheme = Theme.of(context).colorScheme;
-        return StatefulBuilder(
-          builder: (context, setHistoryState) {
-            return SizedBox(
-              height: MediaQuery.of(context).size.height * 0.8,
-              child: FutureBuilder(
-                future: http.get(Uri.parse('$serverUrl/orders')).timeout(const Duration(seconds: 3)),
-                builder: (context, snapshot) {
-                  List orders = [];
-                  if (snapshot.hasData && snapshot.data!.statusCode == 200) {
-                    String responseBody = utf8.decode(snapshot.data!.bodyBytes);
-                    prefs.setString('cached_history', responseBody);
-                    orders = json.decode(responseBody);
-                  } else {
-                    String? cachedHistory = prefs.getString('cached_history');
-                    if (cachedHistory != null) orders = json.decode(cachedHistory);
-                  }
-
-                  return FutureBuilder<List<Map<String, dynamic>>>(
-                    future: OfflineDBHelper.instance.getUnsyncedOrders(),
-                    builder: (context, offlineSnapshot) {
-                      List offlineOrders = [];
-                      if (offlineSnapshot.hasData) {
-                        offlineOrders = offlineSnapshot.data!.map((row) {
-                          var p = json.decode(row['payload']);
-                          p['id'] = row['id'];
-                          p['created_at'] = row['created_at'];
-                          return p;
-                        }).toList();
-                      }
-                      
-                      List allOrders = [...orders, ...offlineOrders];
-                      allOrders.sort((a, b) => (b['created_at'] ?? "").compareTo(a['created_at'] ?? ""));
-
-                      return Column(
-                        children: [
-                          Padding(padding: const EdgeInsets.all(20), child: Align(alignment: Alignment.centerLeft, child: Text("🧾 ປະຫວັດການຂາຍ", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: colorScheme.onSurface)))),
-                          Expanded(
-                            child: allOrders.isEmpty ? Center(child: Text("ຍັງບໍ່ມີການຂາຍ", style: TextStyle(color: colorScheme.onSurfaceVariant)))
-                            : ListView.builder(
-                                itemCount: allOrders.length, 
-                                itemBuilder: (context, index) {
-                                  final order = allOrders[index];
-                                  bool isOffline = order['id'].toString().startsWith("OFFLINE");
-                                  List items = order['items'] ?? []; 
-                                  int seqNum = allOrders.length - index; 
-                                  double totalAmount = (order['total_amount'] as num?)?.toDouble() ?? 0.0;
-
-                                  return Container(
-                                    margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                                    decoration: BoxDecoration(color: colorScheme.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: isOffline ? Colors.orange.shade300 : colorScheme.outline)),
-                                    child: ExpansionTile(
-                                      shape: const Border(),
-                                      leading: Container(
-                                        width: 55, height: 55,
-                                        decoration: BoxDecoration(color: isOffline ? (widget.isDarkMode ? Colors.orange.shade900 : Colors.orange[50]) : Theme.of(context).scaffoldBackgroundColor, borderRadius: BorderRadius.circular(10), border: Border.all(color: isOffline ? Colors.orange.shade300 : colorScheme.outline)),
-                                        child: Column(
-                                          mainAxisAlignment: MainAxisAlignment.center,
-                                          children: [
-                                            Text(isOffline ? "Offline" : "ບິນທີ", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: isOffline ? (widget.isDarkMode ? Colors.orange.shade200 : Colors.orange[800]) : colorScheme.onSurfaceVariant)),
-                                            Text(isOffline ? "Q$seqNum" : "${order['id']}", style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: isOffline ? (widget.isDarkMode ? Colors.white : Colors.orange[900]) : colorScheme.primary)),
-                                          ]
-                                        )
-                                      ),
-                                      title: Text("${NumberFormat("#,##0").format(totalAmount)} LAK", style: TextStyle(fontWeight: FontWeight.bold, color: colorScheme.secondary)), 
-                                      subtitle: Text("${order['created_at']?.substring(11, 16) ?? ''} · ${order['payment_method']} ${isOffline ? '(ຍັງບໍ່ຊິງຄ໌)' : ''}", style: TextStyle(color: colorScheme.onSurfaceVariant)), 
-                                      children: [
-                                        Divider(color: colorScheme.outline, height: 1),
-                                        ...items.map((item) {
-                                          double itemPrice = (item['price_at_sale'] as num?)?.toDouble() ?? 0.0;
-                                          int itemQty = (item['quantity'] as num?)?.toInt() ?? 1;
-                                          return Padding(
-                                            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                                            child: Row(
-                                              crossAxisAlignment: CrossAxisAlignment.start,
-                                              children: [
-                                                Text("${itemQty}x", style: TextStyle(fontWeight: FontWeight.bold, color: colorScheme.primary, fontSize: 16)), const SizedBox(width: 10),
-                                                Expanded(
-                                                  child: Column(
-                                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                                    children: [
-                                                      Text(item['product_name'] ?? 'Unknown Item', style: TextStyle(fontWeight: FontWeight.bold, color: colorScheme.onSurface, fontSize: 16)),
-                                                      if (item['item_type'] != null && item['item_type'].toString().isNotEmpty) Text("${item['item_type']} · Sweet ${item['sweetness']}", style: TextStyle(color: colorScheme.onSurfaceVariant, fontSize: 13)),
-                                                      if (item['note'] != null && item['note'].toString().isNotEmpty) Text("Note: ${item['note']}", style: TextStyle(color: Colors.red[400], fontSize: 13, fontStyle: FontStyle.italic)),
-                                                    ],
-                                                  )
-                                                ),
-                                                Text("${NumberFormat("#,##0").format(itemPrice * itemQty)} LAK", style: TextStyle(color: colorScheme.onSurface)),
-                                              ],
-                                            ),
-                                          );
-                                        }).toList(),
-                                        Padding(
-                                          padding: const EdgeInsets.all(10),
-                                          child: Align(
-                                            alignment: Alignment.centerRight,
-                                            child: TextButton.icon(
-                                              icon: const Icon(Icons.undo, color: Colors.redAccent, size: 18), label: const Text("ຍົກເລີກບິນ (Refund)", style: TextStyle(color: Colors.redAccent)),
-                                              onPressed: () {
-                                                showDialog(
-                                                  context: context, 
-                                                  builder: (_) => AlertDialog(
-                                                    backgroundColor: Theme.of(context).scaffoldBackgroundColor, title: Text("⚠️ ຍົກເລີກບິນ?", style: TextStyle(color: colorScheme.onSurface)), content: Text("ຍົກເລີກບິນແລ້ວຄືນສິນຄ້າເຂົ້າ Stock ແມ່ນບໍ່?", style: TextStyle(color: colorScheme.onSurfaceVariant)),
-                                                    actions: [
-                                                      TextButton(onPressed: () => Navigator.pop(context), child: Text("ບໍ່ (Cancel)", style: TextStyle(color: colorScheme.onSurfaceVariant))),
-                                                      ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red), onPressed: () { Navigator.pop(context); Navigator.pop(context); processRefund(order['id']); }, child: const Text("ຢືນຢັນ (Refund)", style: TextStyle(color: Colors.white)))
-                                                    ]
-                                                  )
-                                                );
-                                              },
-                                            ),
-                                          ),
-                                        )
-                                      ],
-                                    )
-                                  );
-                                }
-                            )
-                          ),
-                        ],
-                      );
-                    }
-                  );
-                }
-              )
-            );
-          }
-        );
-      }
-    );
-  }
-
-  List<ProductModel> getFilteredProducts() { 
-    if (selectedCategory == "All") return products;
-    return products.where((i) => i.category == selectedCategory).toList();
-  }
-
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final fmt = NumberFormat("#,##0");
     double totalCartPrice = cart.fold(0.0, (sum, item) => sum + (item.price * item.qty));
     int totalItems = cart.fold(0, (sum, item) => sum + item.qty);
+    
+    double screenWidth = MediaQuery.of(context).size.width;
+    int crossAxisCount = screenWidth > 900 ? 5 : (screenWidth > 600 ? 3 : 2);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Coffee Shop☕"), 
+        title: Row(
+          children: [
+            _ConnectionLamp(isServerOnline: isServerOnline),
+            const SizedBox(width: 10),
+            const Text("ILa HomeBar&Coffee☕"),
+          ],
+        ), 
         actions: [
-          IconButton(onPressed: widget.toggleTheme, icon: Icon(widget.isDarkMode ? Icons.light_mode : Icons.dark_mode, color: colorScheme.onSurfaceVariant)),
-          IconButton(onPressed: showHeldBillsDialog, icon: const Icon(Icons.access_time)), 
-          IconButton(onPressed: showOrderHistory, icon: const Icon(Icons.receipt_long)), 
-          IconButton(onPressed: showAddProductDialog, icon: Icon(Icons.add_box_outlined, color: colorScheme.secondary)), 
-          const SizedBox(width: 10),
+          IconButton(onPressed: widget.toggleTheme, icon: Icon(widget.isDarkMode ? Icons.light_mode : Icons.dark_mode)),
+          IconButton(onPressed: () {}, icon: const Icon(Icons.receipt_long)), 
+          IconButton(onPressed: fetchProducts, icon: const Icon(Icons.refresh)), 
         ]
       ),
-      body: RefreshIndicator(
-        onRefresh: fetchProducts,
-        color: colorScheme.primary, backgroundColor: colorScheme.surface,
+      body: Column(
+        children: [
+          _CategoryBar(
+            categories: categories, 
+            selectedCategory: selectedCategory, 
+            onSelected: (c) => setState(() => selectedCategory = c)
+          ),
+          Expanded(
+            child: isLoading 
+              ? const Center(child: CircularProgressIndicator()) 
+              : GridView.builder(
+                  padding: const EdgeInsets.all(15), 
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: crossAxisCount,
+                    childAspectRatio: 0.8, 
+                    crossAxisSpacing: 12, 
+                    mainAxisSpacing: 12
+                  ), 
+                  itemCount: products.where((p) => selectedCategory == "All" || p.category == selectedCategory).length, 
+                  itemBuilder: (context, index) {
+                    final filteredProducts = products.where((p) => selectedCategory == "All" || p.category == selectedCategory).toList();
+                    final item = filteredProducts[index];
+                    return _ProductCard(
+                      item: item, 
+                      onTap: () => addToCart(item, "Iced", "100%", "", item.price), // Simplified for speed
+                      categoryIcon: getCategoryIcon(item.category),
+                    );
+                  }
+                )
+          )
+        ],
+      ),
+      bottomNavigationBar: cart.isEmpty ? null : _CartBottomBar(
+        totalItems: totalItems, 
+        totalPrice: totalCartPrice,
+        onPay: () => setState(() => cart.clear()),
+      ),
+    );
+  }
+}
+
+// 🚀 --- High Performance UI Components ---
+
+class _ConnectionLamp extends StatelessWidget {
+  final bool isServerOnline;
+  const _ConnectionLamp({required this.isServerOnline});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 12, height: 12,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: isServerOnline ? Colors.green : Colors.red,
+        boxShadow: [BoxShadow(color: (isServerOnline ? Colors.green : Colors.red).withOpacity(0.5), blurRadius: 4)]
+      ),
+    );
+  }
+}
+
+class _CategoryBar extends StatelessWidget {
+  final List<String> categories;
+  final String selectedCategory;
+  final Function(String) onSelected;
+
+  const _CategoryBar({required this.categories, required this.selectedCategory, required this.onSelected});
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Container(
+      height: 60, 
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        itemCount: categories.length,
+        itemBuilder: (context, index) {
+          final c = categories[index];
+          bool isSelected = selectedCategory == c;
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 5),
+            child: FilterChip(
+              label: Text(c, style: TextStyle(fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)),
+              selected: isSelected,
+              onSelected: (_) => onSelected(c),
+              selectedColor: colorScheme.primary,
+              checkmarkColor: Colors.white,
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _ProductCard extends StatelessWidget {
+  final ProductModel item;
+  final VoidCallback onTap;
+  final IconData categoryIcon;
+
+  const _ProductCard({required this.item, required this.onTap, required this.categoryIcon});
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    bool isOutOfStock = item.stock <= 0;
+
+    return GestureDetector(
+      onTap: isOutOfStock ? null : onTap,
+      child: Card(
+        elevation: 0,
+        color: isOutOfStock ? Colors.grey[200] : colorScheme.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), border: Border.all(color: colorScheme.outline)),
         child: Column(
           children: [
-            Container(
-              height: 60, padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10), 
-              child: ListView(
-                scrollDirection: Axis.horizontal, 
-                children: categories.map((c) {
-                  bool isSelected = selectedCategory == c;
-                  return Padding(
-                    padding: const EdgeInsets.only(right: 10), 
-                    child: ElevatedButton(
-                      onPressed: () => setState(() => selectedCategory = c), 
-                      style: ElevatedButton.styleFrom(
-                        elevation: 0, backgroundColor: isSelected ? colorScheme.primary : colorScheme.surface, foregroundColor: isSelected ? (widget.isDarkMode ? softBlackDark : paperWhite) : colorScheme.onSurface, 
-                        side: BorderSide(color: isSelected ? colorScheme.primary : colorScheme.outline), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)), padding: const EdgeInsets.symmetric(horizontal: 20)
-                      ), 
-                      child: Text(c, style: const TextStyle(fontWeight: FontWeight.bold))
-                    )
-                  );
-                }).toList()
-              )
-            ),
-            
             Expanded(
-              child: selectedCategory == "About CEO" 
-              ? Center(
-                  child: SingleChildScrollView( 
-                    physics: const AlwaysScrollableScrollPhysics(), 
-                    child: Container(
-                      width: 300, padding: const EdgeInsets.all(30), decoration: BoxDecoration(color: colorScheme.surface, borderRadius: BorderRadius.circular(16), border: Border.all(color: colorScheme.outline), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 10)]),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min, 
-                        children: [
-                          ClipRRect(borderRadius: BorderRadius.circular(100), child: Image.asset("assets/sumday.jpg", fit: BoxFit.cover, height: 120, width: 120, errorBuilder: (_,__,___)=> const Icon(Icons.person, size: 80))),
-                          const SizedBox(height: 20), 
-                          Text("MR. MICK", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: colorScheme.onSurface, letterSpacing: 1)), 
-                          Text("Founder & CEO", style: TextStyle(fontSize: 14, color: colorScheme.onSurfaceVariant, fontStyle: FontStyle.italic)), 
-                          const SizedBox(height: 15), 
-                          Container(padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 5), decoration: BoxDecoration(color: colorScheme.secondary, borderRadius: BorderRadius.circular(20)), child: Text("Priceless 💎", style: TextStyle(fontSize: 14, color: widget.isDarkMode ? softBlackDark : paperWhite, fontWeight: FontWeight.bold))), 
-                        ]
+              child: ClipRRect(
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+                child: item.image.isNotEmpty
+                    ? CachedNetworkImage(
+                        imageUrl: item.image,
+                        fit: BoxFit.cover,
+                        width: double.infinity,
+                        memCacheHeight: 250, // 🚀 ประหยัด RAM
+                        placeholder: (context, url) => const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+                        errorWidget: (context, url, error) => Icon(categoryIcon, size: 40, color: colorScheme.primary),
                       )
-                    ),
-                  )
-                )
-              : isLoading 
-                ? Center(child: CircularProgressIndicator(color: colorScheme.primary)) 
-                : GridView.builder(
-                    physics: const AlwaysScrollableScrollPhysics(), 
-                    padding: const EdgeInsets.all(15), 
-                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 2, childAspectRatio: 0.85, crossAxisSpacing: 15, mainAxisSpacing: 15), 
-                    itemCount: getFilteredProducts().length, 
-                    itemBuilder: (context, index) {
-                      final item = getFilteredProducts()[index];
-                      bool isOutOfStock = item.stock <= 0;
-                      return GestureDetector(
-                        onTap: isOutOfStock ? null : () => openProductOptionDialog(item), 
-                        onLongPress: () => showManageOptions(index, item), 
-                        child: Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(color: isOutOfStock ? Theme.of(context).scaffoldBackgroundColor : colorScheme.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: colorScheme.outline)),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.center, 
-                            children: [ 
-                              Expanded(
-                                child: Container(
-                                  width: double.infinity,
-                                  decoration: BoxDecoration(color: Theme.of(context).scaffoldBackgroundColor, borderRadius: BorderRadius.circular(8)),
-                                  child: item.image.isNotEmpty
-                                  ? ClipRRect(
-                                      borderRadius: BorderRadius.circular(8),
-                                      child: CachedNetworkImage(
-                                        imageUrl: item.image, width: double.infinity, height: double.infinity, fit: BoxFit.cover,
-                                        placeholder: (context, url) => Center(child: CircularProgressIndicator(color: colorScheme.primary)),
-                                        errorWidget: (context, url, error) => Center(child: Icon(getCategoryIcon(item.category), size: 45, color: isOutOfStock ? colorScheme.onSurfaceVariant : colorScheme.primary)),
-                                      ),
-                                    )
-                                  : Center(child: Icon(getCategoryIcon(item.category), size: 45, color: isOutOfStock ? colorScheme.onSurfaceVariant : colorScheme.primary))
-                                )
-                              ), 
-                              const SizedBox(height: 12), 
-                              Text(item.name, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: isOutOfStock ? colorScheme.onSurfaceVariant : colorScheme.onSurface), textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis), 
-                              const SizedBox(height: 4), 
-                              Text("${fmt.format(item.price)} ກີບ", style: TextStyle(fontSize: 14, color: isOutOfStock ? colorScheme.onSurfaceVariant : colorScheme.secondary, fontWeight: FontWeight.bold)), 
-                            ]
-                          )
-                        )
-                      );
-                    }
-                  )
-            )
+                    : Icon(categoryIcon, size: 40, color: colorScheme.primary),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: Column(
+                children: [
+                  Text(item.name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13), textAlign: TextAlign.center, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  Text("${NumberFormat("#,##0").format(item.price)} กีบ", style: TextStyle(color: colorScheme.secondary, fontSize: 12, fontWeight: FontWeight.bold)),
+                ],
+              ),
+            ),
           ],
         ),
       ),
-      bottomNavigationBar: cart.isEmpty ? null : BottomAppBar(
-        color: colorScheme.surface, elevation: 10,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 5.0),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    );
+  }
+}
+
+class _CartBottomBar extends StatelessWidget {
+  final int totalItems;
+  final double totalPrice;
+  final VoidCallback onPay;
+
+  const _CartBottomBar({required this.totalItems, required this.totalPrice, required this.onPay});
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return BottomAppBar(
+      height: 80,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Column(
-                mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text("ກະຕ່າ ($totalItems ລາຍການ)", style: TextStyle(fontSize: 14, color: colorScheme.onSurfaceVariant, fontWeight: FontWeight.bold)),
-                  Text("${fmt.format(totalCartPrice)} LAK", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: colorScheme.onSurface)),
-                ],
-              ),
-              ElevatedButton.icon(
-                onPressed: showCartDialog, 
-                icon: Icon(Icons.shopping_cart, color: widget.isDarkMode ? softBlackDark : paperWhite), 
-                label: Text("ຈ່າຍເງິນ (View)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: widget.isDarkMode ? softBlackDark : paperWhite)),
-                style: ElevatedButton.styleFrom(backgroundColor: colorScheme.primary, padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
-              )
+              Text("$totalItems Items", style: const TextStyle(fontSize: 12)),
+              Text("${NumberFormat("#,##0").format(totalPrice)} LAK", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             ],
           ),
-        ),
+          ElevatedButton(
+            onPressed: onPay,
+            style: ElevatedButton.styleFrom(backgroundColor: colorScheme.primary, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15)),
+            child: const Text("PAY NOW", style: TextStyle(fontWeight: FontWeight.bold)),
+          )
+        ],
       ),
     );
   }

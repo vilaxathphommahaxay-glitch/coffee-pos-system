@@ -1,38 +1,52 @@
 from pydantic import BaseModel
 from typing import List, Optional
-from decimal import Decimal
 from datetime import datetime
 
-# --- ສ່ວນຂອງ Product (ສິນຄ້າ) ---
+# --- สินค้า (Product) ---
 class ProductBase(BaseModel):
     name: str
     category: str
-    price: Decimal
+    price: float
+    stock: int
     image_url: Optional[str] = None
-    is_active: bool = True
-
-class ProductCreate(ProductBase):
-    pass
 
 class Product(ProductBase):
     id: int
+    is_active: bool
+
     class Config:
         from_attributes = True
 
-# --- ສ່ວນຂອງ Order (ການຂາຍ) ---
+# --- รายการในออเดอร์ (Order Item) ---
 class OrderItemBase(BaseModel):
     product_id: int
     quantity: int
-    price_at_sale: Decimal
+    price_at_sale: float
+    sweetness: Optional[str] = ""
+    item_type: Optional[str] = ""
+    note: Optional[str] = ""
 
-class OrderCreate(BaseModel):
-    items: List[OrderItemBase]
+class OrderItem(OrderItemBase):
+    id: int
+    order_id: int
+
+    class Config:
+        from_attributes = True
+
+# --- ออเดอร์ (Order) ---
+class OrderBase(BaseModel):
+    total_amount: float
     payment_method: str
-    employee_id: int
-    total_amount: Decimal
+    employee_id: Optional[int] = None
 
-class Order(OrderCreate):
+class OrderCreate(OrderBase):
+    items: List[OrderItemBase]
+
+class Order(OrderBase):
     id: int
     created_at: datetime
+    sync_status: str
+    items: List[OrderItem]
+
     class Config:
         from_attributes = True
