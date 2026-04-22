@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'core/theme.dart';
 import 'screens/home_screen.dart';
 
-void main() { 
+void main() async { 
   WidgetsFlutterBinding.ensureInitialized();
+  await Hive.initFlutter();
+  await Hive.openBox('productBox'); // Box for products
+  await Hive.openBox('settingsBox'); // Box for loyalty/settings
   runApp(const CoffeeShopApp()); 
 }
 
