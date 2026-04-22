@@ -1,32 +1,19 @@
 version: '3.8'
 
 services:
-  # 🐘 Database: PostgreSQL
-  db:
-    image: postgres:15-alpine
-    container_name: ila_homebar_db
+  mariadb:
+    image: mariadb:10.11
+    container_name: pos_mariadb
     restart: always
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: admin
-      POSTGRES_DB: coffee_pos_db
+      MYSQL_ROOT_PASSWORD: root_super_password
+      MYSQL_DATABASE: coffee_pos_db
+      MYSQL_USER: pos_admin
+      MYSQL_PASSWORD: pos_SecurePass99!
     ports:
-      - "5432:5432"
+      - "3306:3306"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./init_db.sql:/docker-entrypoint-initdb.d/init_db.sql # รันสคริปต์สร้างตารางอัตโนมัติ
-
-  # ☕ Backend: FastAPI
-  backend:
-    build: .
-    container_name: ila_homebar_backend
-    restart: always
-    ports:
-      - "8000:8000"
-    environment:
-      - DATABASE_URL=postgresql://postgres:admin@db/coffee_pos_db
-    depends_on:
-      - db
+      - mariadb_data:/var/lib/mysql
 
 volumes:
-  postgres_data:
+  mariadb_data:

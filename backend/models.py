@@ -8,11 +8,11 @@ class Product(Base):
     __tablename__ = "products"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, index=True)
-    category = Column(String)
+    name = Column(String(100), index=True)
+    category = Column(String(50))
     price = Column(Float) # ใช้ Float เพื่อความง่ายในการคำนวณกับ main.py
     cost = Column(Float, default=0) # ต้นทุน (เผื่อทำกำไรขาดทุน)
-    image_url = Column(String, nullable=True) # รูปภาพ
+    image_url = Column(String(255), nullable=True) # รูปภาพ
     is_active = Column(Boolean, default=True)
     stock = Column(Integer, default=0) # ⭐ จำนวนสต็อก (สำคัญมาก)
 
@@ -23,13 +23,13 @@ class Order(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     total_amount = Column(Float)
-    payment_method = Column(String) # Cash, QR_ONEPAY
+    payment_method = Column(String(50)) # Cash, QR_ONEPAY
     
     # ทำให้ employee_id เป็น nullable (ว่างได้) เผื่อยังไม่ได้ทำระบบ Login
     employee_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    sync_status = Column(String, default="synced")
+    sync_status = Column(String(20), default="synced")
 
     # เชื่มต่อกับ OrderItem
     items = relationship("OrderItem", back_populates="order")
@@ -46,19 +46,19 @@ class OrderItem(Base):
     price_at_sale = Column(Float)
 
     # ⭐ เพิ่ม 3 ช่องนี้ เพื่อให้รองรับฟีเจอร์ล่าสุดที่เราทำ ⭐
-    sweetness = Column(String, default="") # ระดับความหวาน
-    item_type = Column(String, default="") # ร้อน/เย็น/ปั่น
-    note = Column(String, default="")      # หมายเหตุ
+    sweetness = Column(String(50), default="") # ระดับความหวาน
+    item_type = Column(String(50), default="") # ร้อน/เย็น/ปั่น
+    note = Column(String(255), default="")      # หมายเหตุ
 
     order = relationship("Order", back_populates="items")
     product = relationship("Product")
 
 
-# 4. ຕາຕະລາງພະນັກງານ (Employee Table)
+# 4. ຕาຕະລາງພະນັກງານ (Employee Table)
 class Employee(Base):
     __tablename__ = "employees"
 
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True)
-    password_hash = Column(String)
-    role = Column(String, default="cashier")
+    username = Column(String(100), unique=True, index=True)
+    password_hash = Column(String(255))
+    role = Column(String(50), default="cashi

@@ -2,10 +2,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-# 1. ກຳນົດ URL ສຳລັບຕິດຕໍ່ Database
-# ຮູບແບບ: postgresql://username:password@localhost/dbname
-# ⚠️ ຢ່າລືມປ່ຽນ 'your_password' ເປັນລະຫັດຜ່ານທີ່ເຈົ້າຕັ້ງໄວ້!
-SQLALCHEMY_DATABASE_URL = "postgresql://postgres:admin@localhost/coffee_pos_db"
+# 1. ກຳນົດ URL ສຳລັບຕິດຕໍ່ Database (ใช้รหัสจาก Gemini Pro: pos_SecurePass99!)
+SQLALCHEMY_DATABASE_URL = "mysql+pymysql://pos_admin:pos_SecurePass99!@localhost/coffee_pos_db"
 
 # 2. ສ້າງ Engine (ຕົວຂັບເຄື່ອນການເຊື່ອມຕໍ່)
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
